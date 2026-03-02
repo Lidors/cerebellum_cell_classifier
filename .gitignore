@@ -1,0 +1,40 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Numba JIT cache
+*.nbi
+*.nbc
+
+# Debug scripts and outputs
+debug_*.py
+debug_*.png
+
+# Test/example output data
+test_output/
+
+# Data files (user-generated, not part of the codebase)
+*.npz
+*.npy
+*.bin
+*.mat
+
+# Jupyter notebook checkpoints
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
