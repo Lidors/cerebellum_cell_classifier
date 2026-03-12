@@ -43,41 +43,64 @@ import numba
 # ══════════════════════════════════════════════════════════════════════════════
 
 @numba.njit(cache=True)
-def _ccg_engine(st1: np.ndarray, st2: np.ndarray,
-                n_half: int, bin_s: float) -> np.ndarray:
+def _ccg_matrix_engine(spike_samples: np.ndarray,
+                       spike_cluster_idx: np.ndarray,
+                       n_clusters: int,
+                       n_half: int,
+                       bin_size: int) -> np.ndarray:
     """
-    Bidirectional cross-correlogram counter (JIT-compiled).
+    All-pairs CCG/ACG counter in a single sorted-spike pass.
+
+    Matches MATLAB CCGHeart.c exactly: integer arithmetic, same bin formula.
+    For every ordered pair of spikes (j before i), increments BOTH directions
+    of the CCG matrix simultaneously — one pass handles all pairs.
 
     Parameters
     ----------
-    st1    : (n1,) float64, **sorted** spike times in seconds (reference train)
-    st2    : (n2,) float64, **sorted** spike times in seconds (target  train)
-    n_half : int   — bins on each side of zero lag
-    bin_s  : float — bin width in seconds
+    spike_samples     : (n,) int64, **sorted** merged spike times in samples
+    spike_cluster_idx : (n,) int64, 0-based cluster index per spike
+    n_clusters        : int — number of distinct clusters
+    n_half            : int — bins on each side of zero lag
+    bin_size          : int — bin width in samples
 
     Returns
     -------
-    counts : (2*n_half + 1,) int64
-        counts[n_half + k] = number of st2 spikes at lag k*bin_s after a
-        st1 spike.  k > 0 → st2 after st1; k < 0 → st2 before st1.
+    counts : (2*n_half+1, n_clusters, n_clusters) int64
+        counts[b, i, j] = times cluster j fired at lag b relative to cluster i.
+        b = n_half  → lag 0 (center)
+        b > n_half  → positive lag (cluster j fires after cluster i)
+        b < n_half  → negative lag (cluster j fires before cluster i)
+        Diagonal counts[:, i, i] = ACG (0-lag center NOT zeroed here).
     """
-    n_bins  = 2 * n_half + 1
-    counts  = np.zeros(n_bins, dtype=np.int64)
-    n1      = len(st1)
-    n2      = len(st2)
-    max_lag = n_half * bin_s
+    n_bins    = 2 * n_half + 1
+    counts    = np.zeros((n_bins, n_clusters, n_clusters), dtype=np.int64)
+    max_lag   = n_half * bin_size + bin_size // 2   # matches MATLAB furthest
+    bin_size2 = 2 * bin_size
+    n         = len(spike_samples)
 
     j_lo = 0
-    for i in range(n1):
-        while j_lo < n2 and st1[i] - st2[j_lo] > max_lag:
+    for i in range(n):
+        # Advance j_lo: earliest j where s[i] - s[j] <= max_lag
+        while j_lo < i and spike_samples[i] - spike_samples[j_lo] > max_lag:
             j_lo += 1
-        for j in range(j_lo, n2):
-            diff = st2[j] - st1[i]     # positive → st2 after st1
-            if diff > max_lag:
-                break
-            b = int(diff / bin_s + 0.5) + n_half
-            if 0 <= b < n_bins:
-                counts[b] += 1
+        ci = spike_cluster_idx[i]
+        for j in range(j_lo, i):
+            diff = spike_samples[i] - spike_samples[j]  # in [0, max_lag] (sorted)
+            cj = spike_cluster_idx[j]
+
+            # Forward: ref=cj, target=ci at positive lag.
+            # Matches MATLAB forward pass: excluded when diff == max_lag (abs >= furthest).
+            b_fwd = (2 * diff + bin_size) // bin_size2 + n_half
+            if b_fwd < n_bins:
+                counts[b_fwd, cj, ci] += 1
+
+            # Backward: ref=ci, target=cj at negative lag.
+            # Matches MATLAB: b_bwd = n_half + floor(0.5 - diff/bin_size)
+            #                        = n_half + (bin_size - 2*diff) // (2*bin_size)
+            # MUST be outside the b_fwd check — MATLAB backward uses > (includes diff==max_lag).
+            b_bwd = n_half + (bin_size - 2 * diff) // bin_size2
+            counts[b_bwd, ci, cj] += 1
+
     return counts
 
 
@@ -138,21 +161,117 @@ def _baseline_stats(ccg: np.ndarray, n_half: int,
 #  Public CCG computation
 # ══════════════════════════════════════════════════════════════════════════════
 
+def compute_ccg_matrix(
+    spike_times_s:  np.ndarray,
+    spike_clusters: np.ndarray,
+    cluster_ids,
+    lag_ms:         float = 20.0,
+    bin_ms:         float = 0.2,
+    sample_rate:    float = 30_000.0,
+    normalization:  str   = "rate",
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    CCG / ACG matrix for a selected set of clusters.
+
+    The core function of this module — mirrors MATLAB's CCG() interface.
+    All other CCG/ACG functions are thin wrappers around this one.
+
+    Parameters
+    ----------
+    spike_times_s  : (n_total,) float64 — all spike times in **seconds**
+    spike_clusters : (n_total,) int64   — cluster ID per spike
+    cluster_ids    : array-like of int  — which clusters to compute
+                     Pass one cluster  → returns [n_bins × 1 × 1] (ACG).
+                     Pass two clusters → returns [n_bins × 2 × 2] (ACG + CCG).
+                     Pass N clusters   → returns [n_bins × N × N] (full matrix).
+    lag_ms         : half-window in ms (default 20)
+    bin_ms         : bin size in ms (default 0.2)
+    sample_rate    : Hz (default 30 000)
+    normalization  : 'rate'  → conditional firing rate [Hz]
+                               = counts / (n_ref_spikes × bin_s)  (float64)
+                     'count' → raw spike counts (int64)
+
+    Returns
+    -------
+    cc   : (n_bins, n_clusters, n_clusters)
+               cc[:, i, i] = ACG of cluster_ids[i]  (0-lag center zeroed)
+               cc[:, i, j] = CCG(cluster_ids[i] → cluster_ids[j])
+    t_ms : (n_bins,) float64 — lag axis in ms
+    """
+    cluster_ids = np.asarray(cluster_ids, dtype=np.int64)
+    n_clusters  = len(cluster_ids)
+    n_half      = int(lag_ms / bin_ms)
+    n_bins      = 2 * n_half + 1
+    t_ms        = np.arange(-n_half, n_half + 1, dtype=np.float64) * bin_ms
+    bin_size    = int(round(bin_ms / 1000.0 * sample_rate))
+    bin_s       = bin_ms / 1000.0
+
+    spike_clusters = np.asarray(spike_clusters, dtype=np.int64)
+    spike_times_s  = np.asarray(spike_times_s,  dtype=np.float64)
+
+    # Filter to selected clusters
+    mask     = np.isin(spike_clusters, cluster_ids)
+    clu_filt = spike_clusters[mask]
+    st_filt  = spike_times_s [mask]
+
+    # Sort by spike time
+    order    = np.argsort(st_filt, kind="stable")
+    st_filt  = st_filt [order]
+    clu_filt = clu_filt[order]
+
+    # Convert to integer samples
+    st_int = np.round(st_filt * sample_rate).astype(np.int64)
+
+    # Map cluster IDs → 0-based indices for the engine
+    clu_idx = np.empty(len(clu_filt), dtype=np.int64)
+    for k in range(n_clusters):
+        clu_idx[clu_filt == cluster_ids[k]] = k
+
+    # Spike count per cluster (needed for rate normalisation)
+    n_spikes = np.zeros(n_clusters, dtype=np.int64)
+    for k in range(n_clusters):
+        n_spikes[k] = int(np.sum(clu_idx == k))
+
+    if len(st_int) == 0:
+        empty = np.zeros((n_bins, n_clusters, n_clusters), dtype=np.float64)
+        return empty, t_ms
+
+    counts = _ccg_matrix_engine(st_int, clu_idx, n_clusters, n_half, bin_size)
+
+    # Zero ACG center bin (0-lag self-coincidence artefact)
+    for k in range(n_clusters):
+        counts[n_half, k, k] = 0
+
+    if normalization == "count":
+        return counts, t_ms
+
+    # 'rate': divide each row i by n_spikes[i] * bin_s → Hz
+    cc = np.zeros((n_bins, n_clusters, n_clusters), dtype=np.float64)
+    for i in range(n_clusters):
+        if n_spikes[i] > 0:
+            cc[:, i, :] = counts[:, i, :].astype(np.float64) / (n_spikes[i] * bin_s)
+    return cc, t_ms
+
+
 def compute_ccg(
     st1_s: np.ndarray,
     st2_s: np.ndarray,
-    lag_ms: float = 10.0,
-    bin_ms: float = 0.1,
+    lag_ms: float = 20.0,
+    bin_ms: float = 0.2,
+    sample_rate: "float | None" = None,
 ) -> tuple[np.ndarray, np.ndarray, int]:
     """
     Cross-correlogram between two spike trains.
 
+    Thin wrapper around ``compute_ccg_matrix`` for the common two-train case.
+
     Parameters
     ----------
-    st1_s  : spike times in **seconds** for the reference (trigger) train
-    st2_s  : spike times in **seconds** for the target  train
-    lag_ms : half-window in ms (default 10)
-    bin_ms : bin size    in ms (default 0.1)
+    st1_s       : spike times in **seconds** for the reference (trigger) train
+    st2_s       : spike times in **seconds** for the target train
+    lag_ms      : half-window in ms (default 20)
+    bin_ms      : bin size in ms (default 0.2)
+    sample_rate : recording sample rate in Hz (required)
 
     Returns
     -------
@@ -160,8 +279,13 @@ def compute_ccg(
     t_ms   : (2*n_half+1,) float64 — lag axis in ms
     n_half : int — number of bins per side (center index)
     """
+    if sample_rate is None:
+        raise ValueError(
+            "sample_rate is required. Pass the recording sample rate (e.g. 30_000.0) "
+            "so that spike times are binned with exact integer arithmetic."
+        )
+
     n_half = int(lag_ms / bin_ms)
-    bin_s  = bin_ms / 1000.0
     t_ms   = np.arange(-n_half, n_half + 1, dtype=np.float64) * bin_ms
 
     st1 = np.sort(np.asarray(st1_s, dtype=np.float64))
@@ -170,8 +294,19 @@ def compute_ccg(
     if len(st1) == 0 or len(st2) == 0:
         return np.zeros(2 * n_half + 1, dtype=np.int64), t_ms, n_half
 
-    counts = _ccg_engine(st1, st2, n_half, bin_s)
-    return counts, t_ms, n_half
+    # Merge with temporary cluster IDs: 0 = st1, 1 = st2
+    st_all  = np.concatenate([st1, st2])
+    clu_all = np.concatenate([
+        np.zeros(len(st1), dtype=np.int64),
+        np.ones( len(st2), dtype=np.int64),
+    ])
+
+    cc, _ = compute_ccg_matrix(
+        st_all, clu_all, np.array([0, 1], dtype=np.int64),
+        lag_ms=lag_ms, bin_ms=bin_ms, sample_rate=sample_rate,
+        normalization="count",
+    )
+    return cc[:, 0, 1], t_ms, n_half
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -373,13 +508,13 @@ def build_ccg_labels(
     unit_ids:           np.ndarray,
     spike_times:        np.ndarray,      # samples (int64)
     spike_clusters:     np.ndarray,      # int64
-    unit_positions_um:  np.ndarray,      # (N, 2) µm, main-channel [x, y] per unit
+    unit_positions_um:  np.ndarray,      # (N, 2) um, main-channel [x, y] per unit
     initial_labels:     "np.ndarray | None" = None,   # (N,) str
     sample_rate:        float = 30_000.0,
     max_distance_um:    float = 200.0,
     min_pc_fr_hz:       float = 30.0,
-    lag_ms:             float = 10.0,
-    bin_ms:             float = 0.1,
+    lag_ms:             float = 20.0,
+    bin_ms:             float = 0.2,
     smooth_k_pc_cf:     int   = 11,
     smooth_k_mli:       int   = 3,
     variance_ratio:     float = 1.05,
@@ -398,10 +533,10 @@ def build_ccg_labels(
     unit_ids          : (N,) int — cluster IDs to label
     spike_times       : all spike times in **samples** (from spike_times.npy)
     spike_clusters    : cluster ID per spike (from spike_clusters.npy)
-    unit_positions_um : (N, 2) float — [x, y] µm of main channel per unit
-    initial_labels    : (N,) str — starting labels; None → all 'unknown'
+    unit_positions_um : (N, 2) float — [x, y] um of main channel per unit
+    initial_labels    : (N,) str — starting labels; None -> all 'unknown'
     sample_rate       : Hz (default 30 000)
-    max_distance_um   : only test pairs closer than this (default 200 µm)
+    max_distance_um   : only test pairs closer than this (default 200 um)
     min_pc_fr_hz      : minimum mean FR for a PC candidate (default 30 Hz)
     lag_ms            : CCG half-window in ms (default 10)
     bin_ms            : CCG bin size in ms (default 0.1)
@@ -421,8 +556,8 @@ def build_ccg_labels(
         pc_cf_pairs     : list of (pc_uid, cf_uid) tuples detected
         mli_units       : list of uid detected as MLI
         pair_unit_ids   : (P, 2) int64 — unit IDs for each unordered pair
-        pair_ccgs       : (P, n_bins) float32 — CCG(uid_A → uid_B) counts
-        pair_dists      : (P,) float32 — distance in µm for each pair
+        pair_ccgs       : (P, n_bins) float32 — CCG(uid_A -> uid_B) counts
+        pair_dists      : (P,) float32 — distance in um for each pair
         pair_types      : (P,) str — 'pc_cf', 'mli', 'none'
         pair_scores     : (P,) float32 — score for sorting (higher = stronger)
         ccg_t_ms        : (n_bins,) float64 — lag axis in ms
@@ -470,7 +605,7 @@ def build_ccg_labels(
 
     n_pairs = len(pairs)
     if verbose:
-        print(f"  {n_pairs} unit pairs within {max_distance_um:.0f} µm "
+        print(f"  {n_pairs} unit pairs within {max_distance_um:.0f} um "
               f"(note: first call compiles Numba JIT ~1-2 s) ...")
 
     # ── Allocate pair-level storage ──────────────────────────────────────────
@@ -491,7 +626,7 @@ def build_ccg_labels(
     for p_idx, (i, j, dist) in enumerate(pairs):
         uid_i = int(unit_ids[i])
         uid_j = int(unit_ids[j])
-        all_pair_ids[p_idx]  = [uid_i, uid_j]
+        all_pair_ids[p_idx]   = [uid_i, uid_j]
         all_pair_dists[p_idx] = dist
 
         st_i = sts[uid_i]
@@ -501,12 +636,26 @@ def build_ccg_labels(
         if len(st_i) < min_spikes or len(st_j) < min_spikes:
             continue
 
-        # Compute CCG(i → j) once; flip gives CCG(j → i)
-        counts, _, _ = compute_ccg(st_i, st_j, lag_ms=lag_ms, bin_ms=bin_ms)
-        all_pair_ccgs[p_idx] = counts.astype(np.float32)
+        # Merge the two spike trains and call the unified engine.
+        # cc[:, 0, 1] = CCG(uid_i → uid_j)
+        # cc[:, 1, 0] = CCG(uid_j → uid_i)
+        st_pair  = np.concatenate([st_i, st_j])
+        clu_pair = np.concatenate([
+            np.full(len(st_i), uid_i, dtype=np.int64),
+            np.full(len(st_j), uid_j, dtype=np.int64),
+        ])
+        cc, _ = compute_ccg_matrix(
+            st_pair, clu_pair,
+            np.array([uid_i, uid_j], dtype=np.int64),
+            lag_ms=lag_ms, bin_ms=bin_ms,
+            sample_rate=sample_rate,
+            normalization="count",
+        )
 
-        counts_f = counts.astype(np.float64)
-        counts_r = counts_f[::-1]
+        all_pair_ccgs[p_idx] = cc[:, 0, 1].astype(np.float32)
+
+        counts_f = cc[:, 0, 1].astype(np.float64)  # CCG(uid_i → uid_j)
+        counts_r = cc[:, 1, 0].astype(np.float64)  # CCG(uid_j → uid_i)
 
         # ── PC / CF check (both directions) ──────────────────────────────
         sm_fwd_pc = _smooth(counts_f, smooth_k_pc_cf)
@@ -530,7 +679,7 @@ def build_ccg_labels(
                 all_pair_scores[p_idx] = score
             if verbose:
                 print(f"    PC/CF: unit {uid_i} (FR={mean_frs[uid_i]:.1f} Hz)"
-                      f" → unit {uid_j}  dist={dist:.0f} µm  "
+                      f" -> unit {uid_j}  dist={dist:.0f} um  "
                       f"pause={m_fwd['pause_ratio']:.2f}  "
                       f"asym={m_fwd['asym']:.1f}")
 
@@ -546,7 +695,7 @@ def build_ccg_labels(
                 all_pair_scores[p_idx] = score
             if verbose:
                 print(f"    PC/CF: unit {uid_j} (FR={mean_frs[uid_j]:.1f} Hz)"
-                      f" → unit {uid_i}  dist={dist:.0f} µm  "
+                      f" -> unit {uid_i}  dist={dist:.0f} um  "
                       f"pause={m_rev['pause_ratio']:.2f}  "
                       f"asym={m_rev['asym']:.1f}")
 
@@ -567,8 +716,8 @@ def build_ccg_labels(
                 all_pair_types[p_idx]  = "mli"
                 all_pair_scores[p_idx] = score
             if verbose:
-                print(f"    MLI: unit {uid_i} → unit {uid_j}  "
-                      f"dist={dist:.0f} µm  "
+                print(f"    MLI: unit {uid_i} -> unit {uid_j}  "
+                      f"dist={dist:.0f} um  "
                       f"right={ml_fwd['right_dev']:.2f}  "
                       f"left={ml_fwd['left_dev']:.2f}  "
                       f"tgt_FR={mean_frs[uid_j]:.1f}")
@@ -581,8 +730,8 @@ def build_ccg_labels(
                 all_pair_types[p_idx]  = "mli"
                 all_pair_scores[p_idx] = score
             if verbose:
-                print(f"    MLI: unit {uid_j} → unit {uid_i}  "
-                      f"dist={dist:.0f} µm  "
+                print(f"    MLI: unit {uid_j} -> unit {uid_i}  "
+                      f"dist={dist:.0f} um  "
                       f"right={ml_rev['right_dev']:.2f}  "
                       f"left={ml_rev['left_dev']:.2f}  "
                       f"tgt_FR={mean_frs[uid_i]:.1f}")
@@ -605,7 +754,7 @@ def build_ccg_labels(
         n_mli = int((labels == "MLI").sum())
         n_det = int((all_pair_types != "none").sum())
         print(f"  CCG labeling done:  {n_det} detected pair(s) of {n_pairs}  "
-              f"→ {n_pc} PC, {n_cf} CF, {n_mli} MLI")
+              f"-> {n_pc} PC, {n_cf} CF, {n_mli} MLI")
 
     return {
         "labels":          labels,

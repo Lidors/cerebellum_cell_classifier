@@ -57,7 +57,7 @@ class PlotsPanel(QWidget):
         self._wf_scale    = 1.0
         self._wf_norm     = True    # normalised by default
         self._wf_half_win = 40      # samples either side of peak (40 = full window)
-        self._acg_xlim    = 50.0
+        self._acg_xlim    = 20.0
         self._acg3d_clim  = None
         self._acg3d_log   = True    # log X axis (True) or linear (False)
         self._acg3d_xlim  = 200.0   # max lag displayed on X axis (ms)

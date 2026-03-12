@@ -27,9 +27,9 @@ class SessionData:
     n_spikes_wf  : (n,) int64
     main_channels: (n,) int64
     ch_positions : (n, 8, 2) float64  -- µm coords of 8 extracted channels
-    acg_1d       : (n, 4001) float64  -- conditional rate [Hz]
+    acg_1d       : (n, 201) float64  -- conditional rate [Hz], ±20 ms at 0.2 ms bins
     acg_3d       : (n, 201, 10) float64
-    t_ms         : (4001,) float64  -- lag axis for acg_1d
+    t_ms         : (201,) float64  -- lag axis for acg_1d
     t_log        : (201,) float64   -- log-lag axis for acg_3d
     fr_edges     : (n, 11) float64
     session_name : str
@@ -38,10 +38,15 @@ class SessionData:
 
     def __init__(self, npz_path: str | Path):
         npz_path = Path(npz_path)
+        self._npz_path = npz_path          # keep for save_labels_to_npz
         data = np.load(npz_path, allow_pickle=True)
 
         self.unit_ids      = data["unit_ids"]
-        self.labels        = data["labels"].copy()   # mutable — editable in viewer
+        self.labels        = data["labels"].astype(object).copy()  # object dtype for arbitrary-length strings
+        # Override with sidecar labels file if present (written by save_labels)
+        _sidecar = npz_path.parent / (npz_path.stem + "_labels.npy")
+        if _sidecar.exists():
+            self.labels = np.load(_sidecar, allow_pickle=True).astype(object)
         self.mean_waveforms = data["mean_waveforms"]
         self.std_waveforms  = data["std_waveforms"]
         self.n_spikes_wf   = data["n_spikes_wf"]
@@ -77,6 +82,16 @@ class SessionData:
             self.ccg_pair_scores = np.zeros(0, dtype=np.float32)
             self.has_ccg         = False
             self.n_pairs         = 0
+
+        # ── MFB data (may not exist in older .npz files) ────────────
+        if "mfb_tier" in data:
+            self.mfb_tier  = data["mfb_tier"].copy()   # (n,) str
+            self.mfb_score = data["mfb_score"].copy()  # (n,) float32
+            self.has_mfb   = True
+        else:
+            self.mfb_tier  = np.array([""] * self.n_units)
+            self.mfb_score = np.full(self.n_units, float("nan"), dtype=np.float32)
+            self.has_mfb   = False
 
         # Build uid → array-index lookup
         self._uid_to_idx = {int(uid): i for i, uid in enumerate(self.unit_ids)}
@@ -153,11 +168,22 @@ class SessionData:
                 pass
         return ""
 
+    def get_mfb_tier(self, i: int) -> str:
+        return str(self.mfb_tier[i]) if self.has_mfb else ""
+
+    def get_mfb_score(self, i: int) -> float:
+        return float(self.mfb_score[i]) if self.has_mfb else float("nan")
+
     def get_ccg_label(self, i: int) -> str:
         return str(self.ccg_auto_labels[i]) if i < len(self.ccg_auto_labels) else ""
 
     def uid_to_idx(self, uid: int) -> int:
         return self._uid_to_idx.get(uid, -1)
+
+    def save_labels_to_npz(self):
+        """Save labels to a small sidecar .npy file (fast — does not touch the npz)."""
+        sidecar = self._npz_path.parent / (self._npz_path.stem + "_labels.npy")
+        np.save(sidecar, self.labels)
 
     # ── Pair accessors ───────────────────────────────────────────────────────
 

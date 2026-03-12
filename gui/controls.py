@@ -47,6 +47,7 @@ class ControlPanel(QWidget):
 
     wf_scale_changed    = pyqtSignal(float)
     wf_norm_changed     = pyqtSignal(bool)    # True = normalised
+    wf_hp_changed       = pyqtSignal(bool)    # True = HP-filtered display
     wf_window_changed   = pyqtSignal(int)     # half-window in samples around peak
     acg_xlim_changed    = pyqtSignal(float)
     acg3d_clim_changed  = pyqtSignal(object)  # float | None
@@ -55,6 +56,8 @@ class ControlPanel(QWidget):
     nav_prev            = pyqtSignal()
     nav_next            = pyqtSignal()
     go_to_pair          = pyqtSignal()   # switch to Pairs tab for current unit
+    mfb_confirm         = pyqtSignal()   # user confirms unit is MFB  (key M)
+    mfb_reject          = pyqtSignal()   # user rejects MFB detection (key Shift+M)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -102,6 +105,16 @@ class ControlPanel(QWidget):
         self._wf_norm.toggled.connect(self.wf_norm_changed)
         wf_lay.addWidget(self._wf_norm)
 
+        # HP filter toggle
+        self._wf_hp = QCheckBox("HP filter (300 Hz, zero-phase)")
+        self._wf_hp.setChecked(False)
+        self._wf_hp.setToolTip(
+            "Apply a 1st-order Butterworth high-pass filter (300 Hz, zero-phase)\n"
+            "to the mean waveform before display."
+        )
+        self._wf_hp.toggled.connect(self.wf_hp_changed)
+        wf_lay.addWidget(self._wf_hp)
+
         # Scale
         row1 = QHBoxLayout()
         row1.addWidget(QLabel("Scale:"))
@@ -128,7 +141,7 @@ class ControlPanel(QWidget):
         acg_grp.setStyleSheet(_GRP)
         acg_lay = QHBoxLayout(acg_grp)
         acg_lay.addWidget(QLabel("+/- ms:"))
-        self._acg_xlim = _dspin(2.0, 2000.0, 5.0, 50.0, decimals=0)
+        self._acg_xlim = _dspin(0.5, 20.0, 0.5, 20.0, decimals=1)
         self._acg_xlim.valueChanged.connect(self.acg_xlim_changed)
         acg_lay.addWidget(self._acg_xlim)
         lay.addWidget(acg_grp)
@@ -169,6 +182,34 @@ class ControlPanel(QWidget):
         acg3d_lay.addLayout(man_row)
 
         lay.addWidget(acg3d_grp)
+
+        # ── MFB confirm / reject ───────────────────────────────────────────────
+        mfb_grp = QGroupBox("MFB")
+        mfb_grp.setStyleSheet(_GRP)
+        mfb_lay = QVBoxLayout(mfb_grp)
+        mfb_lay.setSpacing(4)
+
+        confirm_btn = QPushButton("Confirm MFB  [M]")
+        confirm_btn.setStyleSheet(
+            "QPushButton { background: #1a3e1a; color: #aaffaa; "
+            "border: 1px solid #3a6a3a; border-radius: 3px; padding: 3px 10px; font-size: 9pt; }"
+            "QPushButton:hover { background: #2a6a2a; }"
+        )
+        confirm_btn.setToolTip("Set label → MF  [M]")
+        confirm_btn.clicked.connect(self.mfb_confirm)
+        mfb_lay.addWidget(confirm_btn)
+
+        reject_btn = QPushButton("Reject MFB  [\u21e7M]")
+        reject_btn.setStyleSheet(
+            "QPushButton { background: #3e1a1a; color: #ffaaaa; "
+            "border: 1px solid #6a3a3a; border-radius: 3px; padding: 3px 10px; font-size: 9pt; }"
+            "QPushButton:hover { background: #6a2a2a; }"
+        )
+        reject_btn.setToolTip("Set label → unknown  [Shift+M]")
+        reject_btn.clicked.connect(self.mfb_reject)
+        mfb_lay.addWidget(reject_btn)
+
+        lay.addWidget(mfb_grp)
         lay.addStretch()
 
         # ── Unit info ─────────────────────────────────────────────────────────
@@ -189,7 +230,8 @@ class ControlPanel(QWidget):
 
     # ── Unit info ─────────────────────────────────────────────────────────────
     def set_unit_info(self, uid: int, label: str, depth: float,
-                      fr: float, layer: str, c4: str, ccg_label: str = ""):
+                      fr: float, layer: str, c4: str, ccg_label: str = "",
+                      mfb_tier: str = ""):
         lines = [
             f"<b>Unit {uid}</b>",
             f"Label : {label}",
@@ -198,6 +240,8 @@ class ControlPanel(QWidget):
         ]
         if ccg_label:
             lines.append(f"CCG   : {ccg_label}")
+        if mfb_tier:
+            lines.append(f"MFB   : {mfb_tier}")
         if layer:
             lines.append(f"Layer : {layer}")
         if c4:

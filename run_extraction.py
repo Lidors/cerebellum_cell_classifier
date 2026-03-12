@@ -46,6 +46,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from cerebellum_cell_classifier.io.kilosort import load_kilosort
 from cerebellum_cell_classifier.features.waveform import build_waveform_features
+from cerebellum_cell_classifier.features.mfb import build_mfb_features, detect_mfb
 from cerebellum_cell_classifier.features.acg import build_acg_features
 from cerebellum_cell_classifier.features.ccg import build_ccg_labels
 
@@ -111,7 +112,7 @@ def run_extraction(
         Keys: unit_ids, labels, mean_waveforms, std_waveforms, acg_1d,
               acg_3d, t_ms, t_log, main_channels, used_channels,
               channel_positions_used, n_spikes_wf, fr_edges, table,
-              pc_cf_pairs, mli_units.
+              pc_cf_pairs, mli_units, mfb_tier, mfb_score, mfb_feat.
     """
     t0 = time.perf_counter()
     session_path = Path(session_path)
@@ -123,7 +124,7 @@ def run_extraction(
     output_path.mkdir(parents=True, exist_ok=True)
 
     # ── 1. Load Kilosort data ─────────────────────────────────────────────────
-    n_steps = 5 if run_ccg_labeling else 4
+    n_steps = 6 if run_ccg_labeling else 5
 
     if verbose:
         print("=" * 60)
@@ -162,16 +163,38 @@ def run_extraction(
         verbose          = verbose,
     )
 
-    # ── 3. ACG features ───────────────────────────────────────────────────────
+    # ── 3. MFB / NAW waveform features ───────────────────────────────────────
     if verbose:
-        print(f"\n[3/{n_steps}] Computing ACGs ...")
+        print(f"\n[3/{n_steps}] Computing MFB/NAW waveform features ...")
+
+    mfb_feat   = build_mfb_features(
+        unit_ids          = unit_ids_arr,
+        spike_clusters    = ks.spike_clusters,
+        spike_templates   = ks.spike_templates,
+        templates         = ks.templates,
+        whitening_mat_inv = ks.whitening_mat_inv,
+        sample_rate       = sample_rate,
+        verbose           = verbose,
+    )
+    mfb_result = detect_mfb(mfb_feat)
+
+    if verbose:
+        n_core = int((mfb_result["mfb_tier"] == "core").sum())
+        n_prob = int((mfb_result["mfb_tier"] == "probable").sum())
+        print(f"  MFB tiers — core: {n_core}  probable: {n_prob}")
+
+    # ── 4. ACG features ───────────────────────────────────────────────────────
+    if verbose:
+        print(f"\n[4/{n_steps}] Computing ACGs ...")
 
     acg_result = build_acg_features(
         unit_ids       = unit_ids_arr,
         spike_times    = ks.spike_times,
         spike_clusters = ks.spike_clusters,
         sample_rate    = sample_rate,
-        lag_ms         = 2000.0,
+        lag_ms_1d      = 20.0,   # 1D ACG: ±20 ms, 0.2 ms bins (matches CCG)
+        bin_ms_1d      = 0.2,
+        lag_ms         = 2000.0, # 3D ACG: ±2000 ms, 1 ms bins (log-scaled heatmap)
         bin_ms         = 1.0,
         n_fr_bins      = 10,
         n_log_bins     = 100,
@@ -185,7 +208,7 @@ def run_extraction(
 
     if run_ccg_labeling:
         if verbose:
-            print(f"\n[4/{n_steps}] CCG-based cell-type labeling ...")
+            print(f"\n[5/{n_steps}] CCG-based cell-type labeling ...")
 
         # Main-channel position per unit: shape (N, 2)
         unit_positions_um = wf_result["channel_positions_used"][:, 0, :]
@@ -202,14 +225,13 @@ def run_extraction(
             verbose           = verbose,
         )
 
-        # Update labels with CCG-derived labels
-        wf_result["cell_type_labels"] = ccg_result["labels"]
+        # Keep expert-only labels in cell_type_labels; CCG results go to ccg_auto_labels only
         pc_cf_pairs = ccg_result["pc_cf_pairs"]
         mli_units   = ccg_result["mli_units"]
         ccg_auto_labels = ccg_result["ccg_auto_labels"]
 
     # ── 5. Build per-unit table ───────────────────────────────────────────────
-    step_tbl = 5 if run_ccg_labeling else 4
+    step_tbl = 6 if run_ccg_labeling else 5
     if verbose:
         print(f"\n[{step_tbl}/{n_steps}] Building unit table ...")
 
@@ -224,6 +246,8 @@ def run_extraction(
         sample_rate      = sample_rate,
         rec_duration_s   = rec_duration_s,
         session_name     = session_name,
+        mfb_feat         = mfb_feat,
+        mfb_result       = mfb_result,
     )
 
     # ── 6. Save ───────────────────────────────────────────────────────────────
@@ -252,6 +276,13 @@ def run_extraction(
         session_path          = np.array(str(session_path)),
         sample_rate           = np.array(sample_rate),
         rec_duration_s        = np.array(rec_duration_s),
+        # MFB / NAW features
+        mfb_tier              = mfb_result["mfb_tier"],
+        mfb_score             = mfb_result["mfb_score"],
+        mfb_naw_amp_ratio     = mfb_feat["naw_amp_ratio"],
+        mfb_naw_latency_ms    = mfb_feat["naw_latency_from_peak_ms"],
+        mfb_ttp_ms            = mfb_feat["ttp_ms"],
+        mfb_halfwidth_ms      = mfb_feat["halfwidth_ms"],
     )
 
     # Add CCG data if available
@@ -293,6 +324,9 @@ def run_extraction(
         "pc_cf_pairs":            pc_cf_pairs,
         "mli_units":              mli_units,
         "table":                  table,
+        "mfb_tier":               mfb_result["mfb_tier"],
+        "mfb_score":              mfb_result["mfb_score"],
+        "mfb_feat":               mfb_feat,
     }
 
 
@@ -311,6 +345,8 @@ def _build_unit_table(
     sample_rate: float,
     rec_duration_s: float,
     session_name: str,
+    mfb_feat: "dict | None" = None,
+    mfb_result: "dict | None" = None,
 ) -> pd.DataFrame:
     """
     Build a per-unit DataFrame with depth, FR, label, and session columns.
@@ -368,6 +404,19 @@ def _build_unit_table(
             "n_spikes_wf":    int(n_spikes_wf[i]),
             "mean_fr_hz":     round(mean_fr, 2),
         }
+
+        # MFB / NAW detection columns
+        if mfb_feat is not None and mfb_result is not None:
+            def _f(arr, idx):
+                v = float(arr[idx])
+                return round(v, 4) if not (v != v) else float("nan")  # preserve NaN
+
+            row["mfb_tier"]          = str(mfb_result["mfb_tier"][i])
+            row["mfb_score"]         = _f(mfb_result["mfb_score"], i)
+            row["mfb_naw_amp_ratio"] = _f(mfb_feat["naw_amp_ratio"], i)
+            row["mfb_naw_latency_ms"]= _f(mfb_feat["naw_latency_from_peak_ms"], i)
+            row["mfb_ttp_ms"]        = _f(mfb_feat["ttp_ms"], i)
+            row["mfb_halfwidth_ms"]  = _f(mfb_feat["halfwidth_ms"], i)
 
         # Merge columns from cluster_info.tsv
         if uid_int in ci.index:

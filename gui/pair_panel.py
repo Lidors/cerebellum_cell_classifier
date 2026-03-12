@@ -539,7 +539,7 @@ class PairPanel(QWidget):
         plot.clear()
 
         acg, t_ms = data.get_acg_1d(unit_idx)
-        xlim = 50.0
+        xlim = float(np.max(np.abs(t_ms))) if len(t_ms) > 0 else 20.0
         mask = np.abs(t_ms) <= xlim
         t_z = t_ms[mask]
         a_z = acg[mask]

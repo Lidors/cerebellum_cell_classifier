@@ -33,8 +33,14 @@ _LABEL_COLORS = {
     "PkC_cs": "#00BCD4",
 }
 
+_MFB_TIER_COLORS = {
+    "core":     "#F44336",   # red — definite MFB
+    "probable": "#FF9800",   # orange
+}
+
 _LABEL_COL   = 2   # column index of the editable Label cell
 _CCG_LBL_COL = 3   # column index of the read-only CCG auto-label
+_MFB_COL     = 4   # column index of the MFB tier
 
 
 class _LabelDelegate(QStyledItemDelegate):
@@ -103,7 +109,7 @@ class UnitTableWidget(QWidget):
         self._count_label = QLabel()
         lay.addWidget(self._count_label)
 
-        cols = ["#", "ID", "Label", "CCG Label", "Layer", "C4 pred", "Depth (um)", "FR (Hz)"]
+        cols = ["#", "ID", "Label", "CCG Label", "MFB Tier", "MFB Score", "Layer", "C4 pred", "Depth (um)", "FR (Hz)"]
         self._table = QTableWidget(0, len(cols))
         self._table.setHorizontalHeaderLabels(cols)
         self._table.setEditTriggers(QAbstractItemView.DoubleClicked)
@@ -140,19 +146,25 @@ class UnitTableWidget(QWidget):
         self._table.setRowCount(len(indices))
 
         for row, i in enumerate(indices):
-            uid   = int(self.data.unit_ids[i])
-            label = self.data.get_label(i)
+            uid     = int(self.data.unit_ids[i])
+            label   = self.data.get_label(i)
             ccg_lbl = self.data.get_ccg_label(i)
-            layer = self.data.get_layer(i)
-            c4    = self.data.get_c4_pred(i)
-            depth = self.data.get_depth(i)
-            fr    = self.data.get_mean_fr(i)
+            mfb_tier  = self.data.get_mfb_tier(i)
+            mfb_score = self.data.get_mfb_score(i)
+            layer   = self.data.get_layer(i)
+            c4      = self.data.get_c4_pred(i)
+            depth   = self.data.get_depth(i)
+            fr      = self.data.get_mean_fr(i)
+
+            mfb_score_str = f"{mfb_score:.3f}" if mfb_score == mfb_score else ""  # NaN check
 
             cells = [
                 _NumItem(str(i)),
                 _NumItem(str(uid)),
-                QTableWidgetItem(label),    # label — editable via delegate
-                QTableWidgetItem(ccg_lbl),  # CCG auto-label — read-only
+                QTableWidgetItem(label),      # label — editable via delegate
+                QTableWidgetItem(ccg_lbl),    # CCG auto-label — read-only
+                QTableWidgetItem(mfb_tier),   # MFB tier
+                _NumItem(mfb_score_str),      # MFB score
                 QTableWidgetItem(layer),
                 QTableWidgetItem(c4),
                 _NumItem(f"{depth:.0f}"),
@@ -167,6 +179,10 @@ class UnitTableWidget(QWidget):
                         item.setForeground(QColor(color))
                 if col == _CCG_LBL_COL:
                     color = _LABEL_COLORS.get(ccg_lbl)
+                    if color:
+                        item.setForeground(QColor(color))
+                if col == _MFB_COL:
+                    color = _MFB_TIER_COLORS.get(mfb_tier)
                     if color:
                         item.setForeground(QColor(color))
                 self._table.setItem(row, col, item)
@@ -184,6 +200,7 @@ class UnitTableWidget(QWidget):
             i for i in range(self.data.n_units)
             if (text in self.data.get_label(i).lower()
                 or text in self.data.get_ccg_label(i).lower()
+                or text in self.data.get_mfb_tier(i).lower()
                 or text in self.data.get_layer(i).lower()
                 or text in self.data.get_c4_pred(i).lower()
                 or text in str(self.data.unit_ids[i]))
@@ -224,6 +241,42 @@ class UnitTableWidget(QWidget):
         # Update data store in-memory
         self.data.labels[arr_i] = new_label
         self.label_changed.emit(arr_i, new_label)
+
+    def refresh_unit_row(self, unit_i: int):
+        """Update label and MFB cells for a single unit without rebuilding the table."""
+        for row in range(self._table.rowCount()):
+            item = self._table.item(row, 0)
+            if item is None or item.data(Qt.UserRole) != unit_i:
+                continue
+            label    = self.data.get_label(unit_i)
+            mfb_tier = self.data.get_mfb_tier(unit_i)
+
+            label_item = self._table.item(row, _LABEL_COL)
+            if label_item:
+                label_item.setText(label)
+                color = _LABEL_COLORS.get(label)
+                label_item.setForeground(QColor(color) if color else QColor(FG_DEFAULT))
+
+            mfb_item = self._table.item(row, _MFB_COL)
+            if mfb_item:
+                mfb_item.setText(mfb_tier)
+                color = _MFB_TIER_COLORS.get(mfb_tier)
+                mfb_item.setForeground(QColor(color) if color else QColor(FG_DEFAULT))
+            break
+
+    def get_unit_at_offset(self, unit_i: int, delta: int) -> int:
+        """Return the unit array-index that is *delta* rows away from *unit_i*
+        in the current (sorted/filtered) table view.  Returns -1 if out of range."""
+        for row in range(self._table.rowCount()):
+            item = self._table.item(row, 0)
+            if item is not None and item.data(Qt.UserRole) == unit_i:
+                new_row = row + delta
+                if 0 <= new_row < self._table.rowCount():
+                    new_item = self._table.item(new_row, 0)
+                    if new_item is not None:
+                        return new_item.data(Qt.UserRole)
+                return -1
+        return -1
 
     def select_row_for_index(self, unit_i: int):
         for row in range(self._table.rowCount()):

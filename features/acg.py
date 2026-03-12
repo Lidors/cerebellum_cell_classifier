@@ -4,8 +4,8 @@ acg.py
 Compute 1-D and 3-D autocorrelograms (ACGs) from spike trains.
 
 1D ACG  : classic lag histogram, normalised to conditional firing rate [Hz].
-           Direct Python equivalent of CCG.m / CCGHeart.c (Ken Harris / Nate lab)
-           with 'hz' normalisation.
+           Delegates to ``compute_ccg_matrix`` from ccg.py — the ACG is the
+           diagonal of the CCG matrix (cc[:, 0, 0] for a single cluster).
 
 3D ACG  : firing-rate-conditioned ACG with log-scaled lag axis.
            Matches the approach used in the C4 / NeuroPyxels cerebellar classifier
@@ -34,47 +34,12 @@ from __future__ import annotations
 import numpy as np
 import numba
 
+from .ccg import compute_ccg_matrix
+
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Numba JIT inner loops
+#  Numba JIT inner loop for 3D ACG
 # ══════════════════════════════════════════════════════════════════════════════
-
-@numba.njit(cache=True)
-def _acg_1d_engine(spike_times_s, half_bins, bin_size_s):
-    """
-    Bidirectional sliding-window ACG counter.
-    Equivalent to CCGHeart.c for a single spike train.
-
-    Parameters
-    ----------
-    spike_times_s : (n,) float64, **sorted**, spike times in seconds
-    half_bins     : int   — bins on each side of zero lag
-    bin_size_s    : float — bin width in seconds
-
-    Returns
-    -------
-    counts : (2*half_bins + 1,) int64
-    """
-    n_bins  = 2 * half_bins + 1
-    counts  = np.zeros(n_bins, dtype=np.int64)
-    n       = len(spike_times_s)
-    max_lag = half_bins * bin_size_s
-
-    j_start = 0
-    for i in range(n):
-        while j_start < n and spike_times_s[i] - spike_times_s[j_start] > max_lag:
-            j_start += 1
-        for j in range(j_start, n):
-            if j == i:
-                continue
-            diff = spike_times_s[j] - spike_times_s[i]
-            if diff > max_lag:
-                break
-            b = int(diff / bin_size_s + 0.5) + half_bins
-            if 0 <= b < n_bins:
-                counts[b] += 1
-    return counts
-
 
 @numba.njit(cache=True)
 def _acg_3d_engine(spike_times_s, fr_per_spike, fr_bin_edges,
@@ -191,24 +156,34 @@ def _convert_lag_to_log(
 
 def compute_acg(
     spike_times_s: np.ndarray,
-    lag_ms:  float = 500.0,
-    bin_ms:  float = 1.0,
+    lag_ms:      float = 500.0,
+    bin_ms:      float = 1.0,
+    sample_rate: "float | None" = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     1-D autocorrelogram for a single unit.
+
+    Thin wrapper around ``compute_ccg_matrix``:  the ACG is the diagonal
+    of the CCG matrix when only one cluster is passed (cc[:, 0, 0]).
 
     Parameters
     ----------
     spike_times_s : spike times in **seconds** (any order)
     lag_ms        : half-window in ms (default 500)
     bin_ms        : bin size in ms (default 1)
+    sample_rate   : recording sample rate in Hz (required)
 
     Returns
     -------
-    acg  : (n_bins,) float64 — conditional firing rate [Hz]
+    acg  : (n_bins,) float64 — conditional firing rate [Hz], 0-lag zeroed
     t_ms : (n_bins,) float64 — lag axis in ms
     """
-    bin_s  = bin_ms / 1000.0
+    if sample_rate is None:
+        raise ValueError(
+            "sample_rate is required. Pass the recording sample rate (e.g. 30_000.0) "
+            "so that spike times are binned with exact integer arithmetic."
+        )
+
     half   = int(lag_ms / bin_ms)
     n_bins = 2 * half + 1
     t_ms   = np.arange(-half, half + 1, dtype=np.float64) * bin_ms
@@ -216,12 +191,16 @@ def compute_acg(
     if len(spike_times_s) < 2:
         return np.zeros(n_bins), t_ms
 
-    st     = np.sort(np.asarray(spike_times_s, dtype=np.float64))
-    counts = _acg_1d_engine(st, half, bin_s)
+    st  = np.asarray(spike_times_s, dtype=np.float64)
+    clu = np.zeros(len(st), dtype=np.int64)   # single cluster, ID = 0
 
-    acg       = counts.astype(np.float64) / (len(st) * bin_s)
-    acg[half] = 0.0   # zero 0-lag bin (self-coincidence artefact)
-    return acg, t_ms
+    cc, _ = compute_ccg_matrix(
+        st, clu, np.array([0], dtype=np.int64),
+        lag_ms=lag_ms, bin_ms=bin_ms, sample_rate=sample_rate,
+        normalization="rate",
+    )
+    # cc[:, 0, 0] = ACG, 0-lag already zeroed, normalized to Hz
+    return cc[:, 0, 0], t_ms
 
 
 def compute_acg_3d(
@@ -302,6 +281,8 @@ def build_acg_features(
     spike_times:    np.ndarray,    # samples (int64)
     spike_clusters: np.ndarray,
     sample_rate:    float = 30_000.0,
+    lag_ms_1d:      float = 20.0,
+    bin_ms_1d:      float = 0.2,
     lag_ms:         float = 2000.0,
     bin_ms:         float = 1.0,
     n_fr_bins:      int   = 10,
@@ -318,8 +299,10 @@ def build_acg_features(
     spike_times    : all spike times in **samples** (from spike_times.npy)
     spike_clusters : cluster label per spike (from spike_clusters.npy)
     sample_rate    : Hz (default 30 000)
-    lag_ms         : ACG half-window in ms for linear computation
-    bin_ms         : linear bin size in ms
+    lag_ms_1d      : 1-D ACG half-window in ms (default 20, same as CCG)
+    bin_ms_1d      : 1-D ACG bin size in ms (default 0.2, same as CCG)
+    lag_ms         : 3-D ACG half-window in ms for linear computation (default 2000)
+    bin_ms         : 3-D ACG linear bin size in ms (default 1)
     n_fr_bins      : firing-rate quantile bins for 3-D ACG
     n_log_bins     : log-spaced lag bins (positive half) for 3-D ACG
     log_start_ms   : first log bin in ms
@@ -329,15 +312,15 @@ def build_acg_features(
     -------
     dict
         unit_ids  : (n_units,) int64
-        acg_1d    : (n_units, 2*half+1) float64   — linear lag, [Hz]
+        acg_1d    : (n_units, 2*half_1d+1) float64   — linear lag, [Hz]
         acg_3d    : (n_units, 2*n_log_bins+1, n_fr_bins) float64
-        t_ms      : (2*half+1,) linear lag axis [ms]   for acg_1d
+        t_ms      : (2*half_1d+1,) linear lag axis [ms]   for acg_1d
         t_log     : (2*n_log_bins+1,) log lag axis [ms] for acg_3d
         fr_edges  : (n_units, n_fr_bins+1) float64 — per-unit FR quantile edges
     """
     unit_ids = np.asarray(unit_ids, dtype=np.int64)
     n_units  = len(unit_ids)
-    half_1d  = int(lag_ms / bin_ms)
+    half_1d  = int(lag_ms_1d / bin_ms_1d)
     n_lag_1d = 2 * half_1d + 1
     n_lag_3d = 2 * n_log_bins + 1
 
@@ -348,7 +331,8 @@ def build_acg_features(
 
     if verbose:
         print(f"Computing ACGs for {n_units} units  "
-              f"(lag ±{lag_ms:.0f} ms, bin {bin_ms} ms, "
+              f"(1D: lag ±{lag_ms_1d:.0f} ms, bin {bin_ms_1d} ms | "
+              f"3D: lag ±{lag_ms:.0f} ms, bin {bin_ms} ms, "
               f"{n_fr_bins} FR bins, {n_log_bins} log-lag bins)\n"
               "Note: first call compiles Numba JIT (~1-2 s) ...")
 
@@ -358,7 +342,7 @@ def build_acg_features(
         st_s       = st_samples.astype(np.float64) / sample_rate
 
         acg_1d_all[i], t_ms_out = compute_acg(
-            st_s, lag_ms=lag_ms, bin_ms=bin_ms,
+            st_s, lag_ms=lag_ms_1d, bin_ms=bin_ms_1d, sample_rate=sample_rate,
         )
         acg_3d_all[i], t_log_out, fr_edges_all[i] = compute_acg_3d(
             st_s, lag_ms=lag_ms, bin_ms=bin_ms,

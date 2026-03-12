@@ -65,6 +65,13 @@ class KilosortData:
     good_units:        np.ndarray
     sample_rate:       float = 30_000.0
     spike_positions:   Optional[np.ndarray] = field(default=None, repr=False)
+    # Kilosort template arrays (optional — used for MFB/NAW waveform features)
+    templates:         Optional[np.ndarray] = field(default=None, repr=False)
+    # (n_templates, n_samples, n_channels) float32
+    spike_templates:   Optional[np.ndarray] = field(default=None, repr=False)
+    # (n_spikes,) int64 — 0-based template index per spike
+    whitening_mat_inv: Optional[np.ndarray] = field(default=None, repr=False)
+    # (n_channels, n_channels) float64 — inverse whitening matrix
 
 
 # ── Public API ──────────────────────────────────────────────────────────────────
@@ -112,6 +119,20 @@ def load_kilosort(
     good_units      = _extract_good_units(cluster_info)
     cluster_channels = _extract_cluster_channels(cluster_info)
 
+    # Optional template arrays (for MFB/NAW waveform feature extraction)
+    tpl_path = path / "templates.npy"
+    templates = np.load(tpl_path).astype(np.float32) if tpl_path.exists() else None
+
+    st_path = path / "spike_templates.npy"
+    spike_templates = (
+        np.load(st_path).flatten().astype(np.int64) if st_path.exists() else None
+    )
+
+    winv_path = path / "whitening_mat_inv.npy"
+    whitening_mat_inv = (
+        np.load(winv_path).astype(np.float64) if winv_path.exists() else None
+    )
+
     return KilosortData(
         spike_times=spike_times,
         spike_clusters=spike_clusters,
@@ -121,6 +142,9 @@ def load_kilosort(
         good_units=good_units,
         sample_rate=sample_rate,
         spike_positions=spike_positions,
+        templates=templates,
+        spike_templates=spike_templates,
+        whitening_mat_inv=whitening_mat_inv,
     )
 
 

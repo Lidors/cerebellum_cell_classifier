@@ -15,6 +15,8 @@ Keyboard shortcuts
   Tab            -- switch between Units / Pairs views
   A / R          -- accept / reject pair (Pairs view)
   N / P          -- next / prev pair for same unit (Pairs view)
+  M              -- confirm MFB (label→MF, tier→core)  (Units view)
+  Shift+M        -- reject MFB detection (tier→review) (Units view)
 """
 
 from __future__ import annotations
@@ -24,7 +26,7 @@ import os
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QSplitter,
     QVBoxLayout, QHBoxLayout, QTabBar, QTabWidget,
-    QPushButton, QFileDialog, QMessageBox, QStatusBar, QAction,
+    QPushButton, QFileDialog, QMessageBox, QStatusBar, QAction, QShortcut,
 )
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QKeySequence
@@ -91,6 +93,7 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._connect_signals()
+        self._build_global_shortcuts()
         self._load_unit(0)
 
     # ── UI ─────────────────────────────────────────────────────────────────────
@@ -201,6 +204,7 @@ class MainWindow(QMainWindow):
         c = self._controls
         c.wf_scale_changed.connect(self._on_wf_scale)
         c.wf_norm_changed.connect(self._on_wf_norm)
+        c.wf_hp_changed.connect(self._on_wf_hp)
         c.wf_window_changed.connect(self._on_wf_window)
         c.acg_xlim_changed.connect(self._on_acg_xlim)
         c.acg3d_clim_changed.connect(self._on_acg3d_clim)
@@ -209,10 +213,22 @@ class MainWindow(QMainWindow):
         c.nav_prev.connect(self._prev)
         c.nav_next.connect(self._next)
         c.go_to_pair.connect(self._switch_to_pairs)
+        c.mfb_confirm.connect(self._confirm_mfb)
+        c.mfb_reject.connect(self._reject_mfb)
 
         # Pair panel
         self._pair_panel.go_to_unit.connect(self._pair_goto_unit)
         self._pair_panel.labels_changed.connect(self._on_pair_labels_changed)
+
+    def _build_global_shortcuts(self):
+        """Shortcuts that fire regardless of which widget has keyboard focus."""
+        sc_m = QShortcut(QKeySequence("M"), self)
+        sc_m.setContext(Qt.ApplicationShortcut)
+        sc_m.activated.connect(self._confirm_mfb)
+
+        sc_sm = QShortcut(QKeySequence("Shift+M"), self)
+        sc_sm.setContext(Qt.ApplicationShortcut)
+        sc_sm.activated.connect(self._reject_mfb)
 
     # ── Session management ───────────────────────────────────────────────────────
     def _data(self) -> SessionData:
@@ -282,9 +298,10 @@ class MainWindow(QMainWindow):
         fr    = data.get_mean_fr(i)
         layer = data.get_layer(i)
         c4    = data.get_c4_pred(i)
-        ccg_lbl = data.get_ccg_label(i)
+        ccg_lbl  = data.get_ccg_label(i)
+        mfb_tier = data.get_mfb_tier(i)
 
-        self._controls.set_unit_info(uid, label, depth, fr, layer, c4, ccg_lbl)
+        self._controls.set_unit_info(uid, label, depth, fr, layer, c4, ccg_lbl, mfb_tier)
         sess = self._sessions[self._cur_sess][0]
         self.statusBar().showMessage(
             f"[{sess}]  Unit {uid}  |  {label}  |  {depth:.0f} um  "
@@ -293,12 +310,14 @@ class MainWindow(QMainWindow):
 
     # ── Navigation ────────────────────────────────────────────────────────────────
     def _prev(self):
-        if self._unit_i > 0:
-            self._load_unit(self._unit_i - 1)
+        new_i = self._unit_table.get_unit_at_offset(self._unit_i, -1)
+        if new_i >= 0:
+            self._load_unit(new_i)
 
     def _next(self):
-        if self._unit_i < self._data().n_units - 1:
-            self._load_unit(self._unit_i + 1)
+        new_i = self._unit_table.get_unit_at_offset(self._unit_i, +1)
+        if new_i >= 0:
+            self._load_unit(new_i)
 
     # ── Control responses ─────────────────────────────────────────────────────────
     def _on_wf_scale(self, v: float):
@@ -307,6 +326,10 @@ class MainWindow(QMainWindow):
 
     def _on_wf_norm(self, norm: bool):
         self._plots.set_wf_norm(norm)
+        self._do_load_unit()
+
+    def _on_wf_hp(self, hp: bool):
+        self._plots.set_wf_hp(hp)
         self._do_load_unit()
 
     def _on_wf_window(self, hw: int):
@@ -401,6 +424,29 @@ class MainWindow(QMainWindow):
         self._controls._wf_scale.setValue(new)
         # valueChanged signal fires automatically → _on_wf_scale → _do_load_unit
 
+    # ── MFB confirm / reject ─────────────────────────────────────────────────────
+    def _confirm_mfb(self):
+        """Set label → MF for current unit and auto-save to npz."""
+        data = self._data()
+        i = self._unit_i
+        data.labels[i] = "MF"
+        self._unit_table.refresh_unit_row(i)
+        self._do_load_unit()
+        data.save_labels_to_npz()
+        uid = int(data.unit_ids[i])
+        self.statusBar().showMessage(f"Unit {uid}: label → MF  (saved)", 3000)
+
+    def _reject_mfb(self):
+        """Set label → unknown for current unit and auto-save to npz."""
+        data = self._data()
+        i = self._unit_i
+        data.labels[i] = "unknown"
+        self._unit_table.refresh_unit_row(i)
+        self._do_load_unit()
+        data.save_labels_to_npz()
+        uid = int(data.unit_ids[i])
+        self.statusBar().showMessage(f"Unit {uid}: label → unknown  (saved)", 3000)
+
     # ── Save labels ──────────────────────────────────────────────────────────────
     def _save_labels(self):
         data = self._data()
@@ -438,6 +484,9 @@ class MainWindow(QMainWindow):
             "&nbsp; A  &mdash; accept CCG labels<br>"
             "&nbsp; R  &mdash; reject (set to unknown)<br>"
             "&nbsp; N / P  &mdash; next / previous pair for same unit<br><br>"
+            "<b>MFB (Units view)</b><br>"
+            "&nbsp; M        &mdash; set label → MF<br>"
+            "&nbsp; Shift+M  &mdash; set label → unknown<br><br>"
             "<b>Labels</b><br>"
             "&nbsp; Double-click Label cell in table &mdash; edit label<br>"
             "&nbsp; Ctrl+S  &mdash; save labels to CSV<br><br>"
