@@ -1,6 +1,6 @@
 # Cerebellum Cell Classifier
 
-Extract waveform and autocorrelogram (ACG) features from Neuropixels recordings sorted with **Kilosort 4**, and inspect them in an interactive GUI.
+Extract waveform, autocorrelogram (ACG), cross-correlogram (CCG), and mossy-fiber-bouton (MFB) features from Neuropixels recordings sorted with **Kilosort 4**, and inspect them in an interactive GUI.
 
 Based on the approach of *Herzfeld et al. 2025 (eLife)*.
 
@@ -44,9 +44,6 @@ conda activate cerebellum_clf
 pip install numpy scipy pandas numba pyqt5 pyqtgraph matplotlib scikit-learn tqdm
 ```
 
-> **Note:** `torch` and `umap-learn` are listed in `requirements.txt` for the classifier
-> (Phase 4, not yet implemented). You can skip them for now.
-
 ### 5. Verify the installation
 
 ```bash
@@ -64,17 +61,20 @@ cerebellum_cell_classifier/
 ├── requirements.txt
 │
 ├── io/
-│   └── kilosort.py            ← load Kilosort 4 output
+│   └── kilosort.py            ← load Kilosort 4 output + templates
 ├── features/
 │   ├── waveform.py            ← mean waveform extraction
-│   └── acg.py                 ← 1D and 3D autocorrelogram
+│   ├── acg.py                 ← 1D and 3D autocorrelogram
+│   ├── ccg.py                 ← cross-correlogram, auto-labels PC/CF/MLI pairs
+│   └── mfb.py                 ← NAW-based Mossy Fiber Bouton detection
 ├── gui/
 │   ├── main.py                ← app entry point
 │   ├── app_window.py          ← main window (multi-session tabs)
 │   ├── plots_panel.py         ← waveform + ACG plots
 │   ├── controls.py            ← right-panel controls
 │   ├── unit_table.py          ← sortable unit table
-│   └── data_store.py          ← loads .npz into memory
+│   ├── data_store.py          ← loads .npz into memory
+│   └── pair_panel.py          ← CCG pair explorer
 ├── notebooks/
 │   └── run_extraction_batch.ipynb   ← batch extraction notebook
 └── docs/
@@ -107,8 +107,6 @@ SESSIONS = [
 ]
 ```
 
-The notebook will print progress for each session and display a summary table when done.
-
 ### Option B: Python script
 
 ```python
@@ -117,7 +115,7 @@ from cerebellum_cell_classifier.run_extraction import run_extraction
 run_extraction(
     session_path = r"E:\data\AA23\AA23_05",
     bin_path     = r"E:\data\AA23\AA23_05\AA23_05_g0_tcat.imec0.ap.bin",  # optional
-    labels       = {5: "PC", 124: "MLI"},   # optional
+    labels       = {5: "PC", 124: "MLI"},   # optional expert labels
     output_path  = r"C:\data\features",     # optional
 )
 ```
@@ -143,6 +141,9 @@ The `session_path` folder must contain the standard Kilosort 4 output:
 |------|-------------|
 | `spike_times.npy` | Spike timestamps (samples) |
 | `spike_clusters.npy` | Cluster ID per spike |
+| `spike_templates.npy` | Template index per spike |
+| `templates.npy` | Template waveforms |
+| `whitening_mat_inv.npy` | Inverse whitening matrix |
 | `channel_map.npy` | Channel index mapping |
 | `channel_positions.npy` | Channel x/y positions (µm) |
 | `cluster_info.tsv` | Per-cluster metadata (group, depth, etc.) |
@@ -157,20 +158,34 @@ Both files are written to `output_path/` (default: `<session_path>/features/`):
 | File | Contents |
 |------|----------|
 | `{session}_features.npz` | All features — pass this to the viewer |
-| `{session}_table.csv` | Per-unit table (depth, FR, label, quality metrics) |
+| `{session}_table.csv` | Per-unit table (depth, FR, label, MFB scores, quality metrics) |
 
 The `.npz` contains:
 
 | Array | Shape | Description |
 |-------|-------|-------------|
 | `unit_ids` | `(N,)` | Cluster IDs |
-| `labels` | `(N,)` | Cell-type labels (str) |
+| `labels` | `(N,)` | Expert cell-type labels (str); unlabelled units = `"unknown"` |
 | `mean_waveforms` | `(N, 8, 81)` | Mean spike waveform, 8 channels × 81 samples |
 | `std_waveforms` | `(N, 8, 81)` | Waveform standard deviation |
-| `acg_1d` | `(N, 4001)` | 1D ACG, normalised to Hz |
+| `acg_1d` | `(N, 201)` | 1D ACG, normalised to Hz, ±20 ms at 0.2 ms bins |
 | `acg_3d` | `(N, 201, 10)` | 3D ACG — log-lag × FR-quantile bin |
-| `t_ms` | `(4001,)` | Lag axis for 1D ACG (ms) |
+| `t_ms` | `(201,)` | Lag axis for 1D ACG (ms) |
 | `t_log` | `(201,)` | Lag axis for 3D ACG (ms, log-spaced) |
+| `mfb_tier` | `(N,)` | MFB detection tier: `"core"`, `"probable"`, or `"review"` |
+| `mfb_score` | `(N,)` | MFB confidence score (0–1) |
+| `mfb_naw_amp_ratio` | `(N,)` | NAW amplitude / trough amplitude |
+| `mfb_naw_latency_ms` | `(N,)` | Time from spike peak to NAW minimum (ms) |
+| `mfb_ttp_ms` | `(N,)` | Trough-to-peak duration (ms) |
+| `mfb_halfwidth_ms` | `(N,)` | Waveform halfwidth at trough (ms) |
+| `ccg_auto_labels` | `(N,)` | CCG-derived cell-type labels (separate from expert `labels`) |
+| `ccg_pair_ids` | `(P, 2)` | Unit ID pairs analysed by CCG |
+| `ccg_counts` | `(P, bins)` | CCG spike counts per pair |
+| `ccg_pair_types` | `(P,)` | Detected pair type (`"pc_cf"`, `"mli"`, `"none"`) |
+| `ccg_pair_scores` | `(P,)` | Detection confidence score per pair |
+
+> **Note:** The `labels` array contains only expert labels you provide. CCG auto-labels
+> are stored separately in `ccg_auto_labels` and shown in the GUI's "CCG Label" column.
 
 ---
 
@@ -191,36 +206,62 @@ python viewer.py "C:\data\features\AA23_05_features.npz"
 
 ### GUI overview
 
+The viewer has two sub-tabs: **Units** and **Pairs**.
+
 ```
-┌─ Session tabs ─────────────────────────────────────────────────┐
-│ AA23_05 ×  AA24_01 ×  [+]                                      │
-├──────────┬─────────────────────────────────┬───────────────────┤
-│  Unit    │  Waveform    │  1D ACG           │  Controls         │
-│  table   │              │                   │  ─────────────    │
-│          ├──────────────┴───────────────────┤  Navigation       │
-│  filter  │  3D ACG heatmap                  │  Waveform         │
-│  sort    │  (log-lag × FR-quantile)         │  1D ACG           │
-│  label   │                                  │  3D ACG           │
-└──────────┴──────────────────────────────────┴───────────────────┘
+┌─ Session tabs ─────────────────────────────────────────────────────┐
+│ AA23_05 ×  AA24_01 ×  [+]                                          │
+├─────────────┬──────────────────────────────────┬───────────────────┤
+│  Unit table │  Waveform    │  1D ACG            │  Controls         │
+│  #  ID      │              │                    │  ─────────────    │
+│  Label      ├──────────────┴────────────────────┤  Navigation       │
+│  CCG Label  │  3D ACG heatmap                   │  Waveform         │
+│  MFB Tier   │  (log-lag × FR-quantile)          │  1D ACG           │
+│  MFB Score  │                                   │  3D ACG           │
+│  Layer  C4  │                                   │  MFB              │
+└─────────────┴───────────────────────────────────┴───────────────────┘
 ```
 
 ### Keyboard shortcuts
 
 | Key | Action |
 |-----|--------|
-| `←` / `→` | Previous / next unit |
+| `←` / `→` | Previous / next unit (follows current table sort order) |
+| `M` | Set label → **MF** for current unit (auto-saved) |
+| `Shift+M` | Set label → **unknown** for current unit (auto-saved) |
+| `Tab` | Toggle between Units / Pairs views |
 | `Ctrl+Up` / `Ctrl+Down` | Increase / decrease waveform scale |
 | `Ctrl+O` | Add a session (new tab) |
 | `Ctrl+S` | Save labels to CSV |
 | `Ctrl+Q` | Quit |
 
+**Pairs view shortcuts:**
+
+| Key | Action |
+|-----|--------|
+| `←` / `→` | Previous / next pair |
+| `A` | Accept CCG labels for current pair |
+| `R` | Reject (set labels to unknown) |
+| `N` / `P` | Next / previous pair for the same unit |
+
 ### Labelling units
 
-Double-click the **Label** cell in the unit table to assign a cell type from the dropdown:
+- **Double-click** the Label cell in the unit table to assign a cell type from the dropdown: `PC · CF · MLI · GC · UBC · MF · GoC · unknown`
+- Press **`M`** to instantly label the current unit as `MF` (Mossy Fiber Bouton), or **`Shift+M`** to revert to `unknown`. Both shortcuts work regardless of which part of the GUI has focus.
+- Label changes from `M`/`Shift+M` are **automatically saved** to a sidecar file alongside the `.npz` and are restored on next open.
+- Press `Ctrl+S` to export all labels to a CSV file.
 
-`PC · CF · MLI · GC · UBC · MF · GoC · unknown`
+### MFB detection
 
-Press `Ctrl+S` to export all labels to a CSV file.
+The pipeline automatically detects Mossy Fiber Boutons using the **Negative AfterWave (NAW)** waveform signature (secondary negative deflection after the post-trough peak). Units are assigned a tier:
+
+| Tier | Criteria |
+|------|----------|
+| `core` | NAW amplitude ratio ≥ 0.10, latency ∈ [0.03, 0.60] ms, narrow waveform |
+| `probable` | NAW amplitude ratio ≥ 0.06, same latency and width gates |
+| `review` | All other units |
+
+The MFB Tier and MFB Score columns in the unit table are colour-coded (red = core, orange = probable). Use the **MFB** panel in the control panel or `M`/`Shift+M` to accept or override detections.
 
 ### 3D ACG controls
 
@@ -242,7 +283,7 @@ Make sure you are running from the folder that *contains* `cerebellum_cell_class
 Re-install PyQt5: `pip install --force-reinstall pyqt5`
 
 **Numba recompilation on first run**
-The first time ACG extraction runs, Numba JIT-compiles the inner loop (takes ~10 s). Subsequent runs use a cached compiled version and are fast.
+The first time ACG/CCG extraction runs, Numba JIT-compiles the inner loops (takes ~10 s). Subsequent runs use a cached compiled version and are fast.
 
 **`FileNotFoundError` for `.ap.bin`**
 If you have only one `.bin` file in the session folder, `bin_path` is auto-detected. If there are multiple, pass `bin_path` explicitly.
