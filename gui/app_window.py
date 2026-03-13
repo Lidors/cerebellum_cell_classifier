@@ -427,9 +427,11 @@ class MainWindow(QMainWindow):
             self._view_tabs.setCurrentIndex(new_idx)
             return
 
-        # Delegate to pair panel when in Pairs view
+        # Delegate to pair panel when in Pairs view.
+        # A/R/N/P are handled by global shortcuts — skip them here to avoid double-firing.
         if self._is_pairs_view():
-            self._pair_panel.keyPressEvent(event)
+            if k not in (Qt.Key_A, Qt.Key_R, Qt.Key_N, Qt.Key_P):
+                self._pair_panel.keyPressEvent(event)
             return
 
         # Units view keys
