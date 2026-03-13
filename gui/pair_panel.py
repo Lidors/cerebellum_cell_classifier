@@ -593,25 +593,24 @@ class PairPanel(QWidget):
     #  Accept / Reject
     # ══════════════════════════════════════════════════════════════════════════
     def _accept_pair(self):
-        """Copy combo-box labels into data.labels for both units."""
-        if self._data is None:
+        """Copy combo-box labels into data.labels for both units and auto-save."""
+        if self._data is None or not hasattr(self, "_cur_idx_a"):
             return
         new_a = self._lbl_a.currentText()
         new_b = self._lbl_b.currentText()
         self._data.labels[self._cur_idx_a] = new_a
         self._data.labels[self._cur_idx_b] = new_b
+        self._data.save_labels_to_npz()
         self.labels_changed.emit()
-        # Advance to next pair
-        self._go_next()
 
     def _reject_pair(self):
-        """Set both units to 'unknown'."""
-        if self._data is None:
+        """Set both units to 'unknown' and auto-save."""
+        if self._data is None or not hasattr(self, "_cur_idx_a"):
             return
         self._data.labels[self._cur_idx_a] = "unknown"
         self._data.labels[self._cur_idx_b] = "unknown"
+        self._data.save_labels_to_npz()
         self.labels_changed.emit()
-        self._go_next()
 
     def _goto_unit_a(self):
         if hasattr(self, "_cur_idx_a"):
