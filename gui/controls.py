@@ -58,6 +58,8 @@ class ControlPanel(QWidget):
     go_to_pair          = pyqtSignal()   # switch to Pairs tab for current unit
     mfb_confirm         = pyqtSignal()   # user confirms unit is MFB  (key M)
     mfb_reject          = pyqtSignal()   # user rejects MFB detection (key Shift+M)
+    cf_confirm          = pyqtSignal()   # user labels unit as CF      (key F)
+    cf_reject           = pyqtSignal()   # user removes CF label       (key Shift+F)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -210,6 +212,34 @@ class ControlPanel(QWidget):
         mfb_lay.addWidget(reject_btn)
 
         lay.addWidget(mfb_grp)
+
+        # ── CF manual label ───────────────────────────────────────────────────
+        cf_grp = QGroupBox("CF")
+        cf_grp.setStyleSheet(_GRP)
+        cf_lay = QVBoxLayout(cf_grp)
+        cf_lay.setSpacing(4)
+
+        cf_confirm_btn = QPushButton("Confirm CF  [F]")
+        cf_confirm_btn.setStyleSheet(
+            "QPushButton { background: #1a2e3e; color: #aaccff; "
+            "border: 1px solid #3a5a6a; border-radius: 3px; padding: 3px 10px; font-size: 9pt; }"
+            "QPushButton:hover { background: #2a4a6a; }"
+        )
+        cf_confirm_btn.setToolTip("Set label → CF  [F]")
+        cf_confirm_btn.clicked.connect(self.cf_confirm)
+        cf_lay.addWidget(cf_confirm_btn)
+
+        cf_reject_btn = QPushButton("Reject CF  [\u21e7F]")
+        cf_reject_btn.setStyleSheet(
+            "QPushButton { background: #3e1a1a; color: #ffaaaa; "
+            "border: 1px solid #6a3a3a; border-radius: 3px; padding: 3px 10px; font-size: 9pt; }"
+            "QPushButton:hover { background: #6a2a2a; }"
+        )
+        cf_reject_btn.setToolTip("Set label → unknown  [Shift+F]")
+        cf_reject_btn.clicked.connect(self.cf_reject)
+        cf_lay.addWidget(cf_reject_btn)
+
+        lay.addWidget(cf_grp)
         lay.addStretch()
 
         # ── Unit info ─────────────────────────────────────────────────────────
