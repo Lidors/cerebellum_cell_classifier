@@ -15,8 +15,10 @@ Keyboard shortcuts
   Tab            -- switch between Units / Pairs views
   A / R          -- accept / reject pair (Pairs view)
   N / P          -- next / prev pair for same unit (Pairs view)
-  M              -- confirm MFB (label→MF, tier→core)  (Units view)
-  Shift+M        -- reject MFB detection (tier→review) (Units view)
+  M              -- confirm MFB (label→MF)             (Units view)
+  Shift+M        -- reject MFB (label→unknown)         (Units view)
+  F              -- confirm CF (label→CF)              (Units view)
+  Shift+F        -- reject CF (label→unknown)          (Units view)
 """
 
 from __future__ import annotations
@@ -215,6 +217,8 @@ class MainWindow(QMainWindow):
         c.go_to_pair.connect(self._switch_to_pairs)
         c.mfb_confirm.connect(self._confirm_mfb)
         c.mfb_reject.connect(self._reject_mfb)
+        c.cf_confirm.connect(self._confirm_cf)
+        c.cf_reject.connect(self._reject_cf)
 
         # Pair panel
         self._pair_panel.go_to_unit.connect(self._pair_goto_unit)
@@ -222,6 +226,7 @@ class MainWindow(QMainWindow):
 
     def _build_global_shortcuts(self):
         """Shortcuts that fire regardless of which widget has keyboard focus."""
+        # Units view — MFB
         sc_m = QShortcut(QKeySequence("M"), self)
         sc_m.setContext(Qt.ApplicationShortcut)
         sc_m.activated.connect(self._confirm_mfb)
@@ -229,6 +234,32 @@ class MainWindow(QMainWindow):
         sc_sm = QShortcut(QKeySequence("Shift+M"), self)
         sc_sm.setContext(Qt.ApplicationShortcut)
         sc_sm.activated.connect(self._reject_mfb)
+
+        # Units view — CF
+        sc_f = QShortcut(QKeySequence("F"), self)
+        sc_f.setContext(Qt.ApplicationShortcut)
+        sc_f.activated.connect(self._confirm_cf)
+
+        sc_sf = QShortcut(QKeySequence("Shift+F"), self)
+        sc_sf.setContext(Qt.ApplicationShortcut)
+        sc_sf.activated.connect(self._reject_cf)
+
+        # Pairs view — accept / reject / navigate
+        sc_a = QShortcut(QKeySequence("A"), self)
+        sc_a.setContext(Qt.ApplicationShortcut)
+        sc_a.activated.connect(self._pairs_accept)
+
+        sc_r = QShortcut(QKeySequence("R"), self)
+        sc_r.setContext(Qt.ApplicationShortcut)
+        sc_r.activated.connect(self._pairs_reject)
+
+        sc_n = QShortcut(QKeySequence("N"), self)
+        sc_n.setContext(Qt.ApplicationShortcut)
+        sc_n.activated.connect(self._pairs_next_unit)
+
+        sc_p = QShortcut(QKeySequence("P"), self)
+        sc_p.setContext(Qt.ApplicationShortcut)
+        sc_p.activated.connect(self._pairs_prev_unit)
 
     # ── Session management ───────────────────────────────────────────────────────
     def _data(self) -> SessionData:
@@ -427,6 +458,8 @@ class MainWindow(QMainWindow):
     # ── MFB confirm / reject ─────────────────────────────────────────────────────
     def _confirm_mfb(self):
         """Set label → MF for current unit and auto-save to npz."""
+        if self._is_pairs_view():
+            return
         data = self._data()
         i = self._unit_i
         data.labels[i] = "MF"
@@ -438,6 +471,8 @@ class MainWindow(QMainWindow):
 
     def _reject_mfb(self):
         """Set label → unknown for current unit and auto-save to npz."""
+        if self._is_pairs_view():
+            return
         data = self._data()
         i = self._unit_i
         data.labels[i] = "unknown"
@@ -447,26 +482,63 @@ class MainWindow(QMainWindow):
         uid = int(data.unit_ids[i])
         self.statusBar().showMessage(f"Unit {uid}: label → unknown  (saved)", 3000)
 
+    # ── CF confirm / reject ───────────────────────────────────────────────────
+    def _confirm_cf(self):
+        """Set label → CF for current unit and auto-save to npz."""
+        if self._is_pairs_view():
+            return
+        data = self._data()
+        i = self._unit_i
+        data.labels[i] = "CF"
+        self._unit_table.refresh_unit_row(i)
+        self._do_load_unit()
+        data.save_labels_to_npz()
+        uid = int(data.unit_ids[i])
+        self.statusBar().showMessage(f"Unit {uid}: label → CF  (saved)", 3000)
+
+    def _reject_cf(self):
+        """Set label → unknown for current unit and auto-save to npz."""
+        if self._is_pairs_view():
+            return
+        data = self._data()
+        i = self._unit_i
+        data.labels[i] = "unknown"
+        self._unit_table.refresh_unit_row(i)
+        self._do_load_unit()
+        data.save_labels_to_npz()
+        uid = int(data.unit_ids[i])
+        self.statusBar().showMessage(f"Unit {uid}: label → unknown  (saved)", 3000)
+
+    # ── Pairs view wrappers ───────────────────────────────────────────────────
+    def _pairs_accept(self):
+        if self._is_pairs_view():
+            self._pair_panel._accept_pair()
+
+    def _pairs_reject(self):
+        if self._is_pairs_view():
+            self._pair_panel._reject_pair()
+
+    def _pairs_next_unit(self):
+        if self._is_pairs_view():
+            self._pair_panel._go_next_unit_pair()
+
+    def _pairs_prev_unit(self):
+        if self._is_pairs_view():
+            self._pair_panel._go_prev_unit_pair()
+
     # ── Save labels ──────────────────────────────────────────────────────────────
     def _save_labels(self):
-        data = self._data()
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Save labels CSV",
-            f"{data.session_name}_labels.csv",
-            "CSV files (*.csv);;All files (*)"
-        )
-        if not path:
-            return
         import pandas as pd
+        data = self._data()
+        csv_path = data._npz_path.parent / f"{data.session_name}_labels.csv"
         cols = {
             "unit_id": data.unit_ids,
             "label":   data.labels,
         }
         if data.has_ccg:
             cols["ccg_auto_label"] = data.ccg_auto_labels
-        df = pd.DataFrame(cols)
-        df.to_csv(path, index=False)
-        self.statusBar().showMessage(f"Labels saved to {path}", 4000)
+        pd.DataFrame(cols).to_csv(csv_path, index=False)
+        self.statusBar().showMessage(f"Labels saved to {csv_path.name}", 4000)
 
     # ── Help ─────────────────────────────────────────────────────────────────────
     def _show_shortcuts(self):
@@ -487,9 +559,12 @@ class MainWindow(QMainWindow):
             "<b>MFB (Units view)</b><br>"
             "&nbsp; M        &mdash; set label → MF<br>"
             "&nbsp; Shift+M  &mdash; set label → unknown<br><br>"
+            "<b>CF (Units view)</b><br>"
+            "&nbsp; F        &mdash; set label → CF<br>"
+            "&nbsp; Shift+F  &mdash; set label → unknown<br><br>"
             "<b>Labels</b><br>"
             "&nbsp; Double-click Label cell in table &mdash; edit label<br>"
-            "&nbsp; Ctrl+S  &mdash; save labels to CSV<br><br>"
+            "&nbsp; Ctrl+S  &mdash; save labels to CSV (auto-saved to session folder)<br><br>"
             "<b>Sessions</b><br>"
             "&nbsp; Ctrl+O  &mdash; add session<br>"
             "&nbsp; Click tab to switch, x to close<br><br>"
