@@ -38,9 +38,11 @@ _MFB_TIER_COLORS = {
     "probable": "#FF9800",   # orange
 }
 
-_LABEL_COL   = 2   # column index of the editable Label cell
-_CCG_LBL_COL = 3   # column index of the read-only CCG auto-label
-_MFB_COL     = 4   # column index of the MFB tier
+_LABEL_COL    = 2    # column index of the editable Label cell
+_CCG_LBL_COL  = 3    # column index of the read-only CCG auto-label
+_MFB_COL      = 4    # column index of the MFB tier
+_CLF_LBL_COL  = 10   # column index of the classifier predicted label
+_CLF_CONF_COL = 11   # column index of the classifier confidence
 
 
 class _LabelDelegate(QStyledItemDelegate):
@@ -109,7 +111,7 @@ class UnitTableWidget(QWidget):
         self._count_label = QLabel()
         lay.addWidget(self._count_label)
 
-        cols = ["#", "ID", "Label", "CCG Label", "MFB Tier", "MFB Score", "Layer", "C4 pred", "Depth (um)", "FR (Hz)"]
+        cols = ["#", "ID", "Label", "CCG Label", "MFB Tier", "MFB Score", "Layer", "C4 pred", "Depth (um)", "FR (Hz)", "Clf Label", "Clf Conf"]
         self._table = QTableWidget(0, len(cols))
         self._table.setHorizontalHeaderLabels(cols)
         self._table.setEditTriggers(QAbstractItemView.DoubleClicked)
@@ -157,6 +159,9 @@ class UnitTableWidget(QWidget):
             fr      = self.data.get_mean_fr(i)
 
             mfb_score_str = f"{mfb_score:.3f}" if mfb_score == mfb_score else ""  # NaN check
+            clf_lbl  = self.data.get_clf_label(i)
+            clf_conf = self.data.get_clf_conf(i)
+            clf_conf_str = f"{clf_conf:.2f}" if clf_conf == clf_conf else ""  # NaN check
 
             cells = [
                 _NumItem(str(i)),
@@ -169,6 +174,8 @@ class UnitTableWidget(QWidget):
                 QTableWidgetItem(c4),
                 _NumItem(f"{depth:.0f}"),
                 _NumItem(f"{fr:.1f}"),
+                QTableWidgetItem(clf_lbl),    # classifier predicted label
+                _NumItem(clf_conf_str),       # classifier confidence
             ]
             for col, item in enumerate(cells):
                 item.setTextAlignment(Qt.AlignCenter)
@@ -183,6 +190,10 @@ class UnitTableWidget(QWidget):
                         item.setForeground(QColor(color))
                 if col == _MFB_COL:
                     color = _MFB_TIER_COLORS.get(mfb_tier)
+                    if color:
+                        item.setForeground(QColor(color))
+                if col == _CLF_LBL_COL:
+                    color = _LABEL_COLORS.get(clf_lbl)
                     if color:
                         item.setForeground(QColor(color))
                 self._table.setItem(row, col, item)
@@ -203,6 +214,7 @@ class UnitTableWidget(QWidget):
                 or text in self.data.get_mfb_tier(i).lower()
                 or text in self.data.get_layer(i).lower()
                 or text in self.data.get_c4_pred(i).lower()
+                or text in self.data.get_clf_label(i).lower()
                 or text in str(self.data.unit_ids[i]))
         ]
         self._populate(matched)

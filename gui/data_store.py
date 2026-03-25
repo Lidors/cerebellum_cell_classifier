@@ -93,6 +93,11 @@ class SessionData:
             self.mfb_score = np.full(self.n_units, float("nan"), dtype=np.float32)
             self.has_mfb   = False
 
+        # ── Classifier predictions (populated by GUI after running inference) ──
+        self.clf_labels = np.array([""] * self.n_units, dtype=object)
+        self.clf_conf   = np.full(self.n_units, float("nan"), dtype=np.float32)
+        self.has_clf    = False
+
         # Build uid → array-index lookup
         self._uid_to_idx = {int(uid): i for i, uid in enumerate(self.unit_ids)}
 
@@ -173,6 +178,12 @@ class SessionData:
 
     def get_mfb_score(self, i: int) -> float:
         return float(self.mfb_score[i]) if self.has_mfb else float("nan")
+
+    def get_clf_label(self, i: int) -> str:
+        return str(self.clf_labels[i]) if self.has_clf else ""
+
+    def get_clf_conf(self, i: int) -> float:
+        return float(self.clf_conf[i]) if self.has_clf else float("nan")
 
     def get_ccg_label(self, i: int) -> str:
         return str(self.ccg_auto_labels[i]) if i < len(self.ccg_auto_labels) else ""

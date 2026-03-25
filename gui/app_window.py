@@ -38,6 +38,7 @@ from cerebellum_cell_classifier.gui.unit_table  import UnitTableWidget
 from cerebellum_cell_classifier.gui.plots_panel import PlotsPanel
 from cerebellum_cell_classifier.gui.controls    import ControlPanel
 from cerebellum_cell_classifier.gui.pair_panel  import PairPanel
+from cerebellum_cell_classifier.classifier import load_model_folder, run_inference
 
 DARK = (
     "QMainWindow, QSplitter { background: #0d0d2a; }"
@@ -85,6 +86,7 @@ class MainWindow(QMainWindow):
         ]
         self._cur_sess = 0
         self._unit_i   = 0
+        self._models: dict | None = None   # set after "Load model folder"
 
         # Debounce rapid navigation (arrow keys held)
         self._pending_i = 0
@@ -193,6 +195,16 @@ class MainWindow(QMainWindow):
         quit_act.setShortcut(QKeySequence("Ctrl+Q"))
         quit_act.triggered.connect(self.close)
         fm.addAction(quit_act)
+
+        cm = mb.addMenu("&Classifier")
+
+        load_clf_act = QAction("&Load model folder...", self)
+        load_clf_act.triggered.connect(self._load_model_folder)
+        cm.addAction(load_clf_act)
+
+        run_clf_act = QAction("&Run on current session", self)
+        run_clf_act.triggered.connect(self._run_classifier)
+        cm.addAction(run_clf_act)
 
         hm = mb.addMenu("&Help")
         kb_act = QAction("Keyboard shortcuts", self)
@@ -541,6 +553,46 @@ class MainWindow(QMainWindow):
             cols["ccg_auto_label"] = data.ccg_auto_labels
         pd.DataFrame(cols).to_csv(csv_path, index=False)
         self.statusBar().showMessage(f"Labels saved to {csv_path.name}", 4000)
+
+    # ── Classifier ───────────────────────────────────────────────────────────────
+    def _load_model_folder(self):
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select model folder (containing wf_vae.pt, xgb_clf.json, …)", ""
+        )
+        if not folder:
+            return
+        try:
+            self._models = load_model_folder(folder)
+        except Exception as e:
+            QMessageBox.critical(self, "Load error", str(e))
+            self._models = None
+            return
+        import pathlib
+        self.statusBar().showMessage(
+            f"Model folder loaded: {pathlib.Path(folder).name}", 5000
+        )
+
+    def _run_classifier(self):
+        if self._models is None:
+            QMessageBox.warning(
+                self, "No model loaded",
+                "Please load a model folder first via Classifier → Load model folder…"
+            )
+            return
+        data = self._data()
+        try:
+            labels, conf = run_inference(data, self._models)
+        except Exception as e:
+            QMessageBox.critical(self, "Inference error", str(e))
+            return
+        data.clf_labels = labels
+        data.clf_conf   = conf
+        data.has_clf    = True
+        self._unit_table._populate()
+        self._unit_table.select_row_for_index(self._unit_i)
+        self.statusBar().showMessage(
+            f"Classifier done — {data.n_units} units predicted", 5000
+        )
 
     # ── Help ─────────────────────────────────────────────────────────────────────
     def _show_shortcuts(self):

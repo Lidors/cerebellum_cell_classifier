@@ -38,3 +38,8 @@ Thumbs.db
 dist/
 build/
 *.egg-info/
+
+# Trained model checkpoints (large binaries — store separately)
+checkpoints/
+*.pt
+*.json.xgb
