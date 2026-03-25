@@ -254,6 +254,36 @@ def main():
     shutil.copy(acg_ckpt, output_dir / "acg_vae.pt")
     print(f"Copied VAE checkpoints to {output_dir}")
 
+    # ONNX export — encoder only (returns mu, no sampling needed at inference)
+    import torch.nn as nn
+
+    class _MuOnly(nn.Module):
+        """Wraps an encoder to return only mu (drop logvar)."""
+        def __init__(self, encoder): super().__init__(); self.enc = encoder
+        def forward(self, x): mu, _ = self.enc(x); return mu
+
+    wf_onnx  = output_dir / "wf_encoder.onnx"
+    acg_onnx = output_dir / "acg_encoder.onnx"
+
+    dummy_wf  = torch.zeros(1, 1, n_chan_use, 81, device=device)
+    dummy_acg = torch.zeros(1, 1, 10, 101,       device=device)
+
+    torch.onnx.export(
+        _MuOnly(wf_model.encoder).eval(), dummy_wf, str(wf_onnx),
+        input_names=["wf"], output_names=["mu"],
+        dynamic_axes={"wf": {0: "batch"}, "mu": {0: "batch"}},
+        opset_version=17,
+    )
+    print(f"Exported WF encoder  -> {wf_onnx}")
+
+    torch.onnx.export(
+        _MuOnly(acg_model.encoder).eval(), dummy_acg, str(acg_onnx),
+        input_names=["acg"], output_names=["mu"],
+        dynamic_axes={"acg": {0: "batch"}, "mu": {0: "batch"}},
+        opset_version=17,
+    )
+    print(f"Exported ACG encoder -> {acg_onnx}")
+
     # XGBoost (native JSON format — version-agnostic)
     clf_path = output_dir / "xgb_clf.json"
     clf.save_model(str(clf_path))
